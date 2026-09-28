@@ -1,0 +1,20 @@
+FROM node:24-alpine AS build
+# Apply Alpine security updates to packages included in the base image.
+RUN apk upgrade --no-cache
+WORKDIR /app
+COPY . .
+RUN npm install
+RUN npm run build -w @helio/domain \
+    && npm run build -w @helio/application \
+    && npm run db:generate -w @helio/adapters \
+    && npm run build -w @helio/adapters \
+    && npm run build -w @helio/worker
+RUN npm prune --omit=dev
+
+FROM node:24-alpine
+# Apply Alpine security updates to packages included in the runtime image.
+RUN apk upgrade --no-cache
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app /app/
+CMD ["node", "apps/worker/dist/worker.js"]

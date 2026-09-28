@@ -1,0 +1,26 @@
+{
+  "name": "helio-resolve",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "infra/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "vitest run",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev-api": "npm run dev -w @helio/api",
+    "dev-web": "npm run dev -w @helio/web",
+    "db:generate": "npm run db:generate -w @helio/adapters",
+    "db:migrate": "npm run db:migrate -w @helio/adapters",
+    "db:seed": "npm run db:seed -w @helio/adapters"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.0",
+    "vitest": "^5.0.0"
+  }
+}
