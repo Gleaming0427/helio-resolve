@@ -20,7 +20,10 @@ export interface TicketRepository {
 }
 
 export interface ApprovalRepository {
-  findById(approvalId: ApprovalId): Promise<Approval | null>;
+  findById(
+    tenantId: TenantId,
+    approvalId: ApprovalId,
+  ): Promise<Approval | null>;
   save(approval: Approval): Promise<void>;
 }
 
