@@ -10,6 +10,7 @@ export class Approval {
     public readonly id: ApprovalId,
     public readonly orderId: OrderId,
     public readonly tenantId: TenantId,
+    public readonly reason: string,
     status: ApprovalStatus,
     approvalBy: UserId | null,
   ) {
@@ -27,6 +28,7 @@ export class Approval {
       input.id,
       input.orderId,
       input.tenantId,
+      input.reason,
       "pending",
       null,
     );
@@ -37,12 +39,14 @@ export class Approval {
     orderId: OrderId;
     tenantId: TenantId;
     status: ApprovalStatus;
+    reason: string;
     approvalBy: UserId | null;
   }): Approval {
     return new Approval(
       input.id,
       input.orderId,
       input.tenantId,
+      input.reason,
       input.status,
       input.approvalBy,
     );

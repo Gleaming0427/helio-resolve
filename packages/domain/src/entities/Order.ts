@@ -93,7 +93,7 @@ export class Order {
       this.statusValue,
     );
 
-    if ((requiresPayment && !this.props.paymentId) || !this.props.paidAt) {
+    if (requiresPayment && (!this.props.paymentId || !this.props.paidAt)) {
       throw new DomainError(
         "Paid orders must have a paymentId and paidAt date.",
       );

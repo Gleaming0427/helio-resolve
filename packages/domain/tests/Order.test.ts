@@ -22,6 +22,19 @@ function paidOrder(daysAgo: number): Order {
 }
 
 describe("Order refund rules", () => {
+  it("allows a pending order without payment information", () => {
+    const order = Order.rehydrate({
+      id: OrderId.of("ord_TEST123"),
+      tenantId: TenantId.of("ten_TEST123"),
+      status: "pending",
+      total: Money.ofCents(4_900, "EUR"),
+      paymentId: null,
+      paidAt: null,
+    });
+    expect(order.status).toBe("pending");
+    expect(() => order.requestRefund(now)).toThrow(RefundNotAllowed);
+  });
+
   it("should allow refund for paid orders within 30 days", () => {
     const order = paidOrder(5);
     order.requestRefund(now);

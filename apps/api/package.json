@@ -1,0 +1,26 @@
+{
+  "name": "@helio/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --env-file=../../.env --import tsx src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "refunds:resume": "tsx src/resume-refunds.ts"
+  },
+  "dependencies": {
+    "@helio/domain": "*",
+    "@helio/application": "*",
+    "@helio/adapters": "*",
+    "fastify": "^5.12.5",
+    "@fastify/cors": "^11.3.0",
+    "@fastify/helmet": "^13.1.1",
+    "@fastify/rate-limit": "^11.2.0",
+    "jose": "^6.1.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.0"
+  }
+}

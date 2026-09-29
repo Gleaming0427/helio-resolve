@@ -9,14 +9,16 @@
     "infra/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build -w @helio/domain && npm run build -w @helio/application && npm run build -w @helio/adapters && npm run build -w @helio/api && npm run build -w @helio/worker && npm run build -w @helio/web && npm run build -w @helio/infra",
     "test": "vitest run",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "dev-api": "npm run dev -w @helio/api",
     "dev-web": "npm run dev -w @helio/web",
     "db:generate": "npm run db:generate -w @helio/adapters",
     "db:migrate": "npm run db:migrate -w @helio/adapters",
-    "db:seed": "npm run db:seed -w @helio/adapters"
+    "db:seed": "npm run db:seed -w @helio/adapters",
+    "refunds:resume": "npm run refunds:resume -w @helio/api --",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

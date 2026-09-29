@@ -15,7 +15,7 @@ export interface OrderRepository {
 }
 
 export interface TicketRepository {
-  findById(ticketId: TicketId): Promise<Ticket | null>;
+  findById(tenantId: TenantId, ticketId: TicketId): Promise<Ticket | null>;
   save(ticket: Ticket): Promise<void>;
 }
 
@@ -27,6 +27,9 @@ export interface ApprovalRepository {
   save(approval: Approval): Promise<void>;
 }
 
+/** Replays (including concurrent calls) with the same key and payment must return
+ * the same refund without transferring funds twice, even after a timeout/restart.
+ * Production adapters must enforce this at the payment provider. */
 export interface PaymentGateway {
   refund(input: {
     paymentId: PaymentId;
@@ -34,7 +37,7 @@ export interface PaymentGateway {
   }): Promise<{ providerRefundId: string }>;
 }
 
-export type knowledgeHit = {
+export type KnowledgeHit = {
   chunkId: string;
   documentTitle: string;
   text: string;
@@ -46,15 +49,15 @@ export interface KnowledgeSearch {
     tenantId: TenantId;
     query: string;
     limit: number;
-  }): Promise<knowledgeHit[]>;
+  }): Promise<KnowledgeHit[]>;
 }
 
-export interface knowledgeIngestion {
+export interface KnowledgeIngestion {
   submit(input: {
     tenantId: TenantId;
-    documentTitle: string;
-    chunks: { chunkId: string; text: string }[];
-  }): Promise<void>;
+    title: string;
+    text: string;
+  }): Promise<{ documentKey: string }>;
 }
 
 export interface AuditLog {
@@ -78,4 +81,35 @@ export interface SupportAgent {
     userId: string;
     message: string;
   }): Promise<AgentReply>;
+}
+
+/** Durable intent, created only after explicit manager execution. */
+export type RefundExecution = {
+  tenantId: string;
+  approvalId: string;
+  orderId: string;
+  paymentId: string;
+  actorId: string;
+  idempotencyKey: string;
+  providerRefundId: string | null;
+};
+
+export interface RefundExecutionRepository {
+  find(tenantId: TenantId, approvalId: ApprovalId): Promise<RefundExecution | null>;
+  create(execution: RefundExecution): Promise<void>;
+  complete(tenantId: TenantId, approvalId: ApprovalId, providerRefundId: string): Promise<void>;
+  pending(limit: number): Promise<RefundExecution[]>;
+}
+
+export interface TransactionContext {
+  orders: OrderRepository;
+  tickets: TicketRepository;
+  approvals: ApprovalRepository;
+  audit: AuditLog;
+  refunds: RefundExecutionRepository;
+}
+
+export interface UnitOfWork {
+  /** All writes commit together. Callback may be retried; no external side effects. */
+  run<T>(work: (tx: TransactionContext) => Promise<T>): Promise<T>;
 }

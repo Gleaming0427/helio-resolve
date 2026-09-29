@@ -1,0 +1,81 @@
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+}
+
+model Order {
+    tenantId   String    @db.VarChar(80)
+    id         String    @db.VarChar(80)
+    status     String    @db.VarChar(40)
+    totalCents Int
+    currency   String    @db.VarChar(3)
+    paymentId  String?   @db.VarChar(80)
+    paidAt     DateTime?
+    createdAt  DateTime  @default(now())
+    updatedAt  DateTime  @updatedAt
+
+    @@id([tenantId, id])
+    @@index([tenantId, status])
+}
+
+model Ticket {
+    tenantId  String   @db.VarChar(80)
+    id        String   @db.VarChar(80)
+    createdBy String   @db.VarChar(80)
+    subject   String   @db.VarChar(200)
+    body      String
+    status    String   @db.VarChar(30)
+    createdAt DateTime @default(now())
+
+    @@id([tenantId, id])
+    @@index([tenantId, status])
+}
+
+model Approval {
+    tenantId   String   @db.VarChar(80)
+    id         String   @db.VarChar(80)
+    orderId    String   @db.VarChar(80)
+    reason     String
+    status     String   @db.VarChar(30)
+    approvedBy String?  @db.VarChar(80)
+    createdAt  DateTime @default(now())
+    updatedAt  DateTime @updatedAt
+
+    @@id([tenantId, id])
+    @@index([tenantId, orderId])
+    @@index([tenantId, status])
+}
+
+model AuditEvent {
+    id           String   @id @default(uuid())
+    tenantId     String   @db.VarChar(80)
+    actorId      String   @db.VarChar(80)
+    action       String   @db.VarChar(120)
+    resourceType String   @db.VarChar(80)
+    resourceId   String?  @db.VarChar(80)
+    metadata     Json?
+    createdAt    DateTime @default(now())
+
+    @@index([tenantId, createdAt])
+    @@index([tenantId, action])
+}
+
+// A null providerRefundId means that execution is pending or its outcome is unknown.
+model RefundExecution {
+    tenantId         String   @db.VarChar(80)
+    approvalId       String   @db.VarChar(80)
+    orderId          String   @db.VarChar(80)
+    paymentId        String   @db.VarChar(80)
+    actorId          String   @db.VarChar(80)
+    idempotencyKey   String   @unique
+    providerRefundId String?
+    createdAt        DateTime @default(now())
+    updatedAt        DateTime @updatedAt
+
+    @@id([tenantId, approvalId])
+    @@unique([tenantId, orderId])
+    @@index([providerRefundId, createdAt])
+}

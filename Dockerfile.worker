@@ -17,4 +17,4 @@ RUN apk upgrade --no-cache
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /app /app/
-CMD ["node", "apps/worker/dist/worker.js"]
+CMD ["node", "apps/workers/dist/worker.js"]
