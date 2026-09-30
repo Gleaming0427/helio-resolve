@@ -1,5 +1,9 @@
-import { FakePaymentGateway } from "@helio/adapters/payment";
+import { ConnectedPaymentGateway, FakePaymentGateway, ShopifyConnections } from "@helio/adapters";
 
-// API and recovery MUST use the same provider/account and idempotency semantics.
-// This project currently runs with a simulated payment provider.
-export const payments = new FakePaymentGateway();
+export const shopifyConnections = new ShopifyConnections();
+// API and recovery MUST use the same gateway: each intent records the account it runs on.
+// The simulated provider serves demo tenants without a store, never in production.
+export const payments = new ConnectedPaymentGateway(
+  shopifyConnections,
+  process.env.NODE_ENV === "production" ? null : new FakePaymentGateway(),
+);

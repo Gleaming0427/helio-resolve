@@ -43,6 +43,7 @@ export class PrismaOrderRepository implements OrderRepository {
       total: Money.ofCents(row.totalCents, row.currency as Currency),
       paymentId: row.paymentId ? PaymentId.of(row.paymentId) : null,
       paidAt: row.paidAt,
+      reference: row.reference,
     });
   }
   async save(order: Order): Promise<void> {
@@ -61,6 +62,7 @@ export class PrismaOrderRepository implements OrderRepository {
         currency: order.total.currency,
         paymentId: order.paymentId?.toString() ?? null,
         paidAt: order.paidAt,
+        reference: order.reference,
       },
       update: {
         status: order.status,
@@ -68,6 +70,7 @@ export class PrismaOrderRepository implements OrderRepository {
         currency: order.total.currency,
         paymentId: order.paymentId?.toString() ?? null,
         paidAt: order.paidAt,
+        reference: order.reference,
       },
     });
   }
@@ -84,17 +87,15 @@ export class PrismaTicketRepository implements TicketRepository {
         },
       },
     });
-    if (!row) {
-      return null;
-    }
-    return Ticket.rehydrate({
-      id: TicketId.of(row.id),
-      tenantId: TenantId.of(row.tenantId),
-      createdBy: UserId.of(row.createdBy),
-      subject: row.subject,
-      body: row.body,
-      status: row.status as TicketStatus,
+    return row ? ticketFrom(row) : null;
+  }
+  async list(tenantId: TenantId, status: TicketStatus | null, limit: number): Promise<Ticket[]> {
+    const rows = await this.db.ticket.findMany({
+      where: { tenantId: tenantId.toString(), ...(status ? { status } : {}) },
+      orderBy: { createdAt: "desc" },
+      take: limit,
     });
+    return rows.map(ticketFrom);
   }
   async save(ticket: Ticket): Promise<void> {
     await this.db.ticket.upsert({
@@ -111,12 +112,27 @@ export class PrismaTicketRepository implements TicketRepository {
         subject: ticket.subject,
         body: ticket.body,
         status: ticket.status,
+        orderId: ticket.orderId?.toString() ?? null,
       },
       update: {
         status: ticket.status,
+        resolvedBy: ticket.resolvedBy?.toString() ?? null,
+        resolvedAt: ticket.status === "resolved" ? new Date() : null,
       },
     });
   }
+}
+function ticketFrom(row: { id: string; tenantId: string; createdBy: string; subject: string; body: string; status: string; orderId: string | null; resolvedBy: string | null }) {
+  return Ticket.rehydrate({
+    id: TicketId.of(row.id),
+    tenantId: TenantId.of(row.tenantId),
+    createdBy: UserId.of(row.createdBy),
+    subject: row.subject,
+    body: row.body,
+    orderId: row.orderId ? OrderId.of(row.orderId) : null,
+    status: row.status as TicketStatus,
+    resolvedBy: row.resolvedBy ? UserId.of(row.resolvedBy) : null,
+  });
 }
 export class PrismaApprovalRepository implements ApprovalRepository {
   constructor(private readonly db: Prisma.TransactionClient = prisma) {}
@@ -130,17 +146,15 @@ export class PrismaApprovalRepository implements ApprovalRepository {
         },
       },
     });
-    if (!row) {
-      return null;
-    }
-    return Approval.rehydrate({
-      id: ApprovalId.of(row.id),
-      tenantId: TenantId.of(row.tenantId),
-      orderId: OrderId.of(row.orderId),
-      reason: row.reason,
-      status: row.status as ApprovalStatus,
-      approvalBy: row.approvedBy ? UserId.of(row.approvedBy) : null,
+    return row ? approvalFrom(row) : null;
+  }
+  async list(tenantId: TenantId, statuses: ApprovalStatus[], limit: number): Promise<Approval[]> {
+    const rows = await this.db.approval.findMany({
+      where: { tenantId: tenantId.toString(), status: { in: statuses } },
+      orderBy: { createdAt: "asc" },
+      take: limit,
     });
+    return rows.map(approvalFrom);
   }
   async save(approval: Approval): Promise<void> {
     await this.db.approval.upsert({
@@ -156,6 +170,7 @@ export class PrismaApprovalRepository implements ApprovalRepository {
         orderId: approval.orderId.toString(),
         reason: approval.reason,
         status: approval.status,
+        proposedBy: approval.proposedBy?.toString() ?? null,
         approvedBy: approval.approvalBy?.toString() ?? null,
       },
       update: {
@@ -164,4 +179,15 @@ export class PrismaApprovalRepository implements ApprovalRepository {
       },
     });
   }
+}
+function approvalFrom(row: { id: string; tenantId: string; orderId: string; reason: string; status: string; proposedBy: string | null; approvedBy: string | null }) {
+  return Approval.rehydrate({
+    id: ApprovalId.of(row.id),
+    tenantId: TenantId.of(row.tenantId),
+    orderId: OrderId.of(row.orderId),
+    reason: row.reason,
+    status: row.status as ApprovalStatus,
+    proposedBy: row.proposedBy ? UserId.of(row.proposedBy) : null,
+    approvalBy: row.approvedBy ? UserId.of(row.approvedBy) : null,
+  });
 }

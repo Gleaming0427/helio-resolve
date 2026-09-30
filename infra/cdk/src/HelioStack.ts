@@ -6,21 +6,40 @@ import {
   type StackProps,
 } from "aws-cdk-lib";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
+import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as cloudwatchActions from "aws-cdk-lib/aws-cloudwatch-actions";
+import * as logs from "aws-cdk-lib/aws-logs";
+import * as sns from "aws-cdk-lib/aws-sns";
+import * as subscriptions from "aws-cdk-lib/aws-sns-subscriptions";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as kms from "aws-cdk-lib/aws-kms";
 import * as rds from "aws-cdk-lib/aws-rds";
 import * as s3 from "aws-cdk-lib/aws-s3";
-import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as wafv2 from "aws-cdk-lib/aws-wafv2";
 import { Construct } from "constructs";
 import { fileURLToPath } from "node:url";
+export type HelioStackProps = StackProps & {
+  // Bearer tokens must never cross the internet in clear text: the API is HTTPS only.
+  apiDomainName: string;
+  /** ACM certificate for apiDomainName, in the stack region. */
+  apiCertificateArn: string;
+  /** Receives operations alarms (confirm the SNS subscription email). */
+  alarmEmail?: string;
+};
 export class HelioStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
+  constructor(scope: Construct, id: string, props: HelioStackProps) {
     super(scope, id, props);
+    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(props.apiDomainName)) {
+      throw new Error("apiDomainName must be a host name such as api.example.com");
+    }
+    if (!props.apiCertificateArn.startsWith("arn:")) {
+      throw new Error("apiCertificateArn must be an ACM certificate ARN");
+    }
     const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
     const vpc = new ec2.Vpc(this, "Vpc", {
       maxAzs: 2,
@@ -56,7 +75,9 @@ export class HelioStack extends Stack {
       deletionProtection: true,
       removalPolicy: RemovalPolicy.SNAPSHOT,
     });
-    const knowledgeBucket = new s3.Bucket(this, "KnowledgeBucket", {
+    // Uploads from before the document library (now stored in PostgreSQL). Kept for
+    // their data; no service reads or writes it, so no task role is granted access.
+    new s3.Bucket(this, "KnowledgeBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       versioned: true,
@@ -95,19 +116,10 @@ export class HelioStack extends Stack {
         ],
       },
     );
-    const deadLetterQueue = new sqs.Queue(this, "IngestDlq", {
-      retentionPeriod: Duration.days(14),
-    });
-    const ingestQueue = new sqs.Queue(this, "IngestQueue", {
-      visibilityTimeout: Duration.minutes(5),
-      retentionPeriod: Duration.days(4),
-      deadLetterQueue: {
-        queue: deadLetterQueue,
-        maxReceiveCount: 5,
-      },
-    });
     const userPool = new cognito.UserPool(this, "Users", {
-      selfSignUpEnabled: false,
+      // Signing up creates an identity only; workspace access requires an invitation.
+      selfSignUpEnabled: true,
+      autoVerify: { email: true },
       signInAliases: { email: true },
       mfa: cognito.Mfa.OPTIONAL,
       passwordPolicy: {
@@ -157,6 +169,13 @@ export class HelioStack extends Stack {
     // Cognito access tokens include cognito:groups by default, so the API
     // can derive tenancy without trusting a request body field.
     const cluster = new ecs.Cluster(this, "Cluster", { vpc });
+    // Encrypts each tenant's store credentials (Shopify access token) before they reach
+    // PostgreSQL, with the tenant as encryption context. Only the API role can use it.
+    const secretsKey = new kms.Key(this, "TenantSecretsKey", {
+      description: "Helio tenant store credentials",
+      enableKeyRotation: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
     const apiTask = new ecs.FargateTaskDefinition(this, "ApiTask", {
       cpu: 512,
       memoryLimitMiB: 1024,
@@ -171,12 +190,12 @@ export class HelioStack extends Stack {
       environment: {
         NODE_ENV: "production",
         PORT: "3000",
+        // The ALB is the only proxy in front of the API.
+        TRUST_PROXY_HOPS: "1",
         AWS_REGION: this.region,
         DB_HOST: database.dbInstanceEndpointAddress,
         DB_PORT: database.dbInstanceEndpointPort,
         DB_NAME: "helio",
-        KNOWLEDGE_BUCKET: knowledgeBucket.bucketName,
-        INGEST_QUEUE_URL: ingestQueue.queueUrl,
         COGNITO_USER_POOL_ID: userPool.userPoolId,
         COGNITO_CLIENT_ID: userPoolClient.userPoolClientId,
         BEDROCK_MODEL_ID:
@@ -184,6 +203,7 @@ export class HelioStack extends Stack {
         BEDROCK_EMBED_MODEL_ID:
           process.env.BEDROCK_EMBED_MODEL_ID ?? "amazon.titan-embed-text-v2:0",
         WEB_ORIGIN: `https://${webDistribution.distributionDomainName}`,
+        SECRET_KMS_KEY_ID: secretsKey.keyArn,
       },
       secrets: {
         DB_USER: ecs.Secret.fromSecretsManager(database.secret!, "username"),
@@ -194,6 +214,7 @@ export class HelioStack extends Stack {
       },
     });
     apiContainer.addPortMappings({ containerPort: 3000 });
+    secretsKey.grantEncryptDecrypt(apiTask.taskRole);
     apiTask.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: [
@@ -213,17 +234,22 @@ export class HelioStack extends Stack {
       },
     });
     database.connections.allowDefaultPortFrom(apiService);
-    knowledgeBucket.grantReadWrite(apiTask.taskRole);
-    ingestQueue.grantSendMessages(apiTask.taskRole);
     const loadBalancer = new elbv2.ApplicationLoadBalancer(this, "ApiAlb", {
       vpc,
       internetFacing: true,
     });
-    const listener = loadBalancer.addListener("Http", {
-      port: 80,
+    // No port 80 listener, not even a redirect: a token sent over HTTP has
+    // already leaked before any redirect could answer.
+    const listener = loadBalancer.addListener("Https", {
+      port: 443,
+      protocol: elbv2.ApplicationProtocol.HTTPS,
+      certificates: [elbv2.ListenerCertificate.fromArn(props.apiCertificateArn)],
+      sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS,
     });
+    // TLS ends at the ALB; tasks are only reachable from it, in private subnets.
     listener.addTargets("ApiTargets", {
       port: 3000,
+      protocol: elbv2.ApplicationProtocol.HTTP,
       targets: [apiService],
       healthCheck: {
         path: "/health",
@@ -281,12 +307,16 @@ export class HelioStack extends Stack {
       cpu: 512,
       memoryLimitMiB: 1024,
     });
+    const workerLogs = new logs.LogGroup(this, "WorkerLogs", {
+      retention: logs.RetentionDays.ONE_MONTH,
+    });
     workerTask.addContainer("Worker", {
       image: ecs.ContainerImage.fromAsset(repoRoot, {
         file: "Dockerfile.worker",
       }),
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: "helio-worker",
+        logGroup: workerLogs,
       }),
       environment: {
         NODE_ENV: "production",
@@ -294,7 +324,6 @@ export class HelioStack extends Stack {
         DB_HOST: database.dbInstanceEndpointAddress,
         DB_PORT: database.dbInstanceEndpointPort,
         DB_NAME: "helio",
-        INGEST_QUEUE_URL: ingestQueue.queueUrl,
         BEDROCK_EMBED_MODEL_ID:
           process.env.BEDROCK_EMBED_MODEL_ID ?? "amazon.titan-embed-text-v2:0",
       },
@@ -316,16 +345,57 @@ export class HelioStack extends Stack {
       },
     });
     database.connections.allowDefaultPortFrom(workerService);
-    knowledgeBucket.grantRead(workerTask.taskRole);
-    ingestQueue.grantConsumeMessages(workerTask.taskRole);
     workerTask.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ["bedrock:InvokeModel"],
         resources: ["*"],
       }),
     );
+    // Document indexing is asynchronous: without these alarms, a failing or stopped
+    // worker only shows up as documents that never become available in the chat.
+    const alarmTopic = new sns.Topic(this, "OperationsAlarms");
+    if (props.alarmEmail) {
+      alarmTopic.addSubscription(new subscriptions.EmailSubscription(props.alarmEmail));
+    }
+    const workerErrors = workerLogs.addMetricFilter("WorkerErrors", {
+      filterPattern: logs.FilterPattern.stringValue("$.level", "=", "error"),
+      metricNamespace: "Helio",
+      metricName: "DocumentWorkerErrors",
+      metricValue: "1",
+      defaultValue: 0,
+    });
+    const workerAlarms = [
+      new cloudwatch.Alarm(this, "DocumentWorkerErrorsAlarm", {
+        alarmDescription: "Document indexing failed or the worker cannot reach PostgreSQL/Bedrock. " +
+          "Search the worker logs for document_indexing_failed or document_worker_unavailable.",
+        metric: workerErrors.metric({ statistic: "Sum", period: Duration.minutes(5) }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+      // A running task reports CPU every minute; no samples means no worker.
+      new cloudwatch.Alarm(this, "DocumentWorkerDownAlarm", {
+        alarmDescription: "No document worker task is running: published documents stay queued.",
+        metric: workerService.metricCpuUtilization({ statistic: "SampleCount", period: Duration.minutes(1) }),
+        threshold: 1,
+        evaluationPeriods: 3,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      }),
+    ];
+    for (const alarm of workerAlarms) {
+      alarm.addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+    }
+    new CfnOutput(this, "AlarmTopicArn", {
+      value: alarmTopic.topicArn,
+    });
     new CfnOutput(this, "ApiUrl", {
-      value: `http://${loadBalancer.loadBalancerDnsName}`,
+      value: `https://${props.apiDomainName}`,
+    });
+    // Point apiDomainName to this name (CNAME, or a Route 53 alias).
+    new CfnOutput(this, "ApiLoadBalancerDnsName", {
+      value: loadBalancer.loadBalancerDnsName,
     });
     new CfnOutput(this, "WebDistributionUrl", {
       value: `https://${webDistribution.distributionDomainName}`,

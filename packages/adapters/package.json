@@ -22,6 +22,10 @@
       "types": "./dist/prisma.d.ts",
       "import": "./dist/prisma.js"
     },
+    "./log": {
+      "types": "./dist/log.d.ts",
+      "import": "./dist/log.js"
+    },
     "./payment": {
       "types": "./dist/payment.d.ts",
       "import": "./dist/payment.js"
@@ -29,8 +33,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1136.0",
-    "@aws-sdk/client-s3": "^3.1136.0",
-    "@aws-sdk/client-sqs": "^3.1136.0",
+    "@aws-sdk/client-kms": "^3.1143.0",
     "@helio/application": "*",
     "@helio/domain": "*",
     "@prisma/adapter-pg": "^7.10.0",

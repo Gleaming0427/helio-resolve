@@ -1,9 +1,11 @@
-import { TicketId, TenantId, UserId } from "../value-objects/Ids.js";
+import { DomainError } from "../errors/DomainError.js";
+import { OrderId, TicketId, TenantId, UserId } from "../value-objects/Ids.js";
 
 export type TicketStatus = "open" | "resolved";
 
 export class Ticket {
   private statusValue: TicketStatus;
+  private resolvedByValue: UserId | null;
 
   private constructor(
     public readonly id: TicketId,
@@ -11,9 +13,12 @@ export class Ticket {
     public readonly createdBy: UserId,
     public readonly subject: string,
     public readonly body: string,
+    public readonly orderId: OrderId | null,
     status: TicketStatus,
+    resolvedBy: UserId | null,
   ) {
     this.statusValue = status;
+    this.resolvedByValue = resolvedBy;
   }
 
   static open(input: {
@@ -22,6 +27,7 @@ export class Ticket {
     createdBy: UserId;
     subject: string;
     body: string;
+    orderId?: OrderId | null;
   }): Ticket {
     return new Ticket(
       input.id,
@@ -29,7 +35,9 @@ export class Ticket {
       input.createdBy,
       input.subject,
       input.body,
+      input.orderId ?? null,
       "open",
+      null,
     );
   }
 
@@ -39,7 +47,9 @@ export class Ticket {
     createdBy: UserId;
     subject: string;
     body: string;
+    orderId: OrderId | null;
     status: TicketStatus;
+    resolvedBy: UserId | null;
   }): Ticket {
     return new Ticket(
       input.id,
@@ -47,7 +57,9 @@ export class Ticket {
       input.createdBy,
       input.subject,
       input.body,
+      input.orderId,
       input.status,
+      input.resolvedBy,
     );
   }
 
@@ -55,12 +67,15 @@ export class Ticket {
     return this.statusValue;
   }
 
-  resolve(): void {
+  get resolvedBy(): UserId | null {
+    return this.resolvedByValue;
+  }
+
+  resolve(userId: UserId): void {
     if (this.statusValue !== "open") {
-      throw new Error(
-        `Only open tickets can be resolved. Current status: ${this.statusValue}`,
-      );
+      throw new DomainError("Ce ticket est déjà résolu.");
     }
     this.statusValue = "resolved";
+    this.resolvedByValue = userId;
   }
 }

@@ -1,207 +1,165 @@
-import { useMutation } from "@tanstack/react-query";
-import { useState } from "react";
-import { api, type ApprovalView } from "./api";
-import { auth } from "./auth";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { api, type AgentAction, type ConversationMessage } from "./api";
+import { auth, demoMembers } from "./auth";
 import "./styles.css";
-type ChatMessage = {
-  role: "user" | "assistant";
-  text: string;
+import { Approvals } from "./Approvals";
+import { WorkspaceAdmin } from "./WorkspaceAdmin";
+import { DocumentLibrary } from "./DocumentLibrary";
+import { InvitationAccept } from "./InvitationAccept";
+import { Tickets } from "./Tickets";
+import { canOpen, viewFromHash } from "./views";
+
+// The current conversation survives a reload of the tab; the server keeps its history.
+const CONVERSATION_KEY = "helio-conversation";
+const storedConversation = () => { try { return sessionStorage.getItem(CONVERSATION_KEY); } catch { return null; } };
+const storeConversation = (id: string | null) => {
+  try { if (id) sessionStorage.setItem(CONVERSATION_KEY, id); else sessionStorage.removeItem(CONVERSATION_KEY); } catch { /* private mode */ }
 };
+const headings: Record<string, [string, string, string]> = {
+  chat: ["Traitez vos demandes", "depuis un seul espace.", "Posez une question sur une commande ou vos procédures. L’assistant garde le fil de la conversation, crée un ticket ou prépare un remboursement à approuver."],
+  tickets: ["Suivez les demandes", "qui attendent une personne.", "Les tickets créés depuis l’assistant, avec leur commande. Marquez-les résolus une fois traités."],
+  approvals: ["Vérifiez chaque demande", "de remboursement.", "Une autre personne que l’auteur approuve la proposition, puis le remboursement est exécuté dans la boutique, une seule fois."],
+  knowledge: ["Ajoutez les documents", "que votre équipe utilise.", "Livraison, retours, garanties : ajoutez vos procédures pour les retrouver dans les réponses, avec leurs sources."],
+  settings: ["Configurez votre", "espace SAV.", "Connectez votre boutique, réglez le ton des réponses, le seuil d’approbation et les membres de votre équipe."],
+};
+
 export function App() {
+  const [requestedView, setRequestedView] = useState(() => viewFromHash(location.hash));
+  const setView = (next: string) => {
+    setRequestedView(next);
+    window.history.replaceState(null, "", next === "chat" ? location.pathname + location.search : `#${next}`);
+  };
+  const invitation = sessionStorage.getItem("helio-invitation");
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me, enabled: !invitation, retry: false });
+  const cache = useQueryClient();
+  const currentEmail = me.data?.email;
+  // Lets administrators recognise members. Best effort: the member list falls back to
+  // the identifier, and the next page load retries.
+  useEffect(() => {
+    if (currentEmail === undefined) return;
+    void auth.identity().then(async identity => {
+      if (!identity || identity.email === currentEmail) return;
+      await api.syncEmail(identity.idToken);
+      await cache.invalidateQueries({ queryKey: ["me"] });
+    }).catch(() => undefined);
+  }, [currentEmail, cache]);
+  const admin = me.data?.roles.includes("tenant_admin");
+  const manager = me.data?.roles.includes("support_manager");
+  const view = canOpen(requestedView, me.data?.roles ?? []) ? requestedView : "chat";
+  const [focusApproval, setFocusApproval] = useState<string | null>(null);
+  const [focusTicket, setFocusTicket] = useState<string | null>(null);
+
   const [message, setMessage] = useState("");
-  const [history, setHistory] = useState<ChatMessage[]>([]);
-  const [approvalId, setApprovalId] = useState("");
-  const [approval, setApproval] = useState<ApprovalView | null>(null);
-  const [managerMessage, setManagerMessage] = useState("");
-  const [knowledgeTitle, setKnowledgeTitle] = useState("");
-  const [knowledgeText, setKnowledgeText] = useState("");
-  const [knowledgeMessage, setKnowledgeMessage] = useState("");
+  const [conversationId, setConversationId] = useState<string | null>(storedConversation);
+  const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const conversations = useQuery({ queryKey: ["conversations"], queryFn: api.conversations, enabled: !!me.data });
+  const saved = useQuery({ queryKey: ["conversation", conversationId], queryFn: () => api.conversation(conversationId!), enabled: !!me.data && !!conversationId, retry: false });
+  useEffect(() => { if (saved.data) setMessages(saved.data.messages); }, [saved.data]);
+  // A conversation that no longer exists (or belongs to someone else) is simply dropped.
+  useEffect(() => { if (saved.error) openConversation(null); }, [saved.error]);
+  function openConversation(id: string | null) {
+    storeConversation(id);
+    setConversationId(id);
+    if (!id) setMessages([]);
+  }
   const chat = useMutation({
     mutationFn: api.chat,
-    onSuccess: (result) => {
-      const citations = [...new Set(result.citations)];
-      const suffix = citations.length
-        ? `\n\nSources : ${citations.join(", ")}`
-        : "";
-      setHistory((current) => [
-        ...current,
-        {
-          role: "assistant",
-          text: `${result.text}${suffix}`,
-        },
-      ]);
-    },
-  });
-  const loadApproval = useMutation({
-    mutationFn: api.getApproval,
-    onSuccess: (result) => {
-      setApproval(result);
-      setManagerMessage("");
-    },
-    onError: (error) => {
-      setManagerMessage(error.message);
-    },
-  });
-  const approve = useMutation({
-    mutationFn: api.approve,
-    onSuccess: async () => {
-      setManagerMessage("Approbation enregistrée.");
-      setApproval(await api.getApproval(approvalId));
-    },
-    onError: (error) => {
-      setManagerMessage(error.message);
-    },
-  });
-  const execute = useMutation({
-    mutationFn: api.execute,
     onSuccess: async (result) => {
-      setManagerMessage(`Remboursement exécuté : ${result.providerRefundId}`);
-      setApproval(await api.getApproval(approvalId));
-    },
-    onError: (error) => {
-      setManagerMessage(error.message);
-    },
-  });
-  const submitKnowledge = useMutation({
-    mutationFn: api.submitKnowledge,
-    onSuccess: (result) => {
-      setKnowledgeMessage(`Document en file : ${result.documentKey}`);
-      setKnowledgeTitle("");
-      setKnowledgeText("");
-    },
-    onError: (error) => {
-      setKnowledgeMessage(error.message);
+      setMessages(current => [...current, { role: "assistant", text: result.text, citations: [...new Set(result.citations)], actions: result.actions }]);
+      storeConversation(result.conversationId);
+      setConversationId(result.conversationId);
+      await cache.invalidateQueries({ queryKey: ["conversation", result.conversationId] });
+      await cache.invalidateQueries({ queryKey: ["conversations"] });
     },
   });
   function sendMessage(): void {
     const text = message.trim();
-    if (!text || chat.isPending) {
-      return;
-    }
-    setHistory((current) => [...current, { role: "user", text }]);
+    if (!text || chat.isPending) return;
+    setMessages(current => [...current, { role: "user", text, citations: [], actions: [] }]);
     setMessage("");
-    chat.mutate(text);
+    chat.mutate({ message: text, conversationId: conversationId ?? undefined });
   }
+  function ActionLink({ action }: { action: AgentAction }) {
+    if (action.type === "ticket_created") {
+      return <button onClick={() => { setFocusTicket(action.ticketId); setView("tickets"); }}>Voir le ticket {action.ticketId} ↗</button>;
+    }
+    return manager
+      ? <button onClick={() => { setFocusApproval(action.approvalId); setView("approvals"); }}>Ouvrir la proposition {action.approvalId} ↗</button>
+      : <small>Proposition {action.approvalId} transmise à un manager pour approbation.</small>;
+  }
+
+  if (invitation) return <InvitationAccept token={invitation} />;
+  if (me.isPending) return <p role="status">Chargement de votre espace…</p>;
+  if (me.error) return <main className="approvalPanel panel"><h1>Accès à votre espace</h1><p role="alert">{me.error.message}</p><p>Demandez un lien d’invitation à votre administrateur si vous n’avez pas encore rejoint votre équipe.</p><button onClick={() => void me.refetch()}>Réessayer</button>{!auth.isDev && <button onClick={() => void auth.logout()}>Déconnexion</button>}</main>;
+  const [title, emphasis, intro] = headings[view]!;
   return (
-    <main className="shell">
+    <div className="shell">
       <header>
         <div>
-          <strong>Helio Resolve</strong>
-          <span>Support agentique avec approbation humaine</span>
+          <strong><i className="brandMark">h</i> helio <small>resolve</small></strong>
         </div>
-        <button onClick={() => void auth.logout()}>Déconnexion</button>
+        {auth.isDev
+          ? <label className="sessionBadge">Démonstration · agir en tant que{" "}
+              <select aria-label="Membre de démonstration" value={me.data.userId} onChange={e => { auth.setDevUser(e.target.value); location.reload(); }}>
+                {demoMembers.map(member => <option key={member.userId} value={member.userId}>{member.label}</option>)}
+              </select>
+            </label>
+          : <button onClick={() => void auth.logout()}>Déconnexion</button>}
       </header>
-      <div className="workspace">
-        <section className="chatPanel">
+      <aside className="sidebar"><p className="navLabel">VOTRE ESPACE</p><nav aria-label="Navigation principale">{[["chat", "✧", "Assistant"], ["tickets", "☰", "Tickets"], ["approvals", "✓", "Approbations"], ["knowledge", "▤", "Documents"], ["settings", "⚙", "Réglages"]].filter(([id]) => canOpen(id!, me.data?.roles ?? [])).map(([id, icon, label]) => <button key={id} className={view === id ? "navItem active" : "navItem"} aria-current={view === id ? "page" : undefined} onClick={() => setView(id!)}><span aria-hidden="true">{icon}</span>{label}</button>)}</nav><div className="sidebarNote"><span>✧</span><b>Un remboursement à vérifier ?</b><p>Les propositions créées par l’assistant attendent dans Approbations.</p></div><div className="sidebarFoot">Helio Resolve<br /><span>Votre espace SAV</span></div></aside>
+      <main className="workspace">
+        <div className="pageHeading"><span className="eyebrow">HELIO RESOLVE · SUPPORT CLIENT</span><h1>{title}<br /><em>{emphasis}</em></h1><p>{intro}</p></div>
+        <section className="chatPanel panel" hidden={view !== "chat"} aria-label="Assistant support">
+          <div className="panelHeading">
+            <span>● &nbsp; Assistant Helio</span>
+            <span className="conversationControls">
+              {!!conversations.data?.length && <select aria-label="Reprendre une conversation" value={conversationId ?? ""} onChange={e => openConversation(e.target.value || null)}>
+                <option value="">Conversations récentes…</option>
+                {conversations.data.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}
+              </select>}
+              <button disabled={chat.isPending || !conversationId} onClick={() => openConversation(null)}>Nouvelle conversation</button>
+            </span>
+          </div>
           <div className="chat">
-            {history.length === 0 && (
+            {messages.length === 0 && !saved.isFetching && (
               <div className="empty">
-                Demande un statut de commande, une recherche documentaire, un
-                ticket ou une proposition de remboursement.
+                <div className="heroIcon" aria-hidden="true">✧</div><h2>Quelle demande souhaitez-vous traiter ?</h2><p>Indiquez le numéro de commande ou décrivez le problème.<br />Vous pouvez aussi partir d’un exemple ci-dessous.</p>
+                <div className="suggestions">{[["Suivre une commande", "Peux-tu vérifier la commande #1001 ?"], ["Chercher une information", "Selon notre documentation, quels sont les délais de livraison ?"], ["Préparer un remboursement", "Propose un remboursement pour la commande #1001 : le produit est arrivé endommagé."]].map(([label, prompt]) => <button key={label} onClick={() => setMessage(prompt!)}>{label} ↗</button>)}</div>
               </div>
             )}
-            {history.map((item, index) => (
+            {saved.isFetching && messages.length === 0 && <p role="status">Chargement de la conversation…</p>}
+            {messages.map((item, index) => (
               <article key={index} className={item.role}>
                 <b>{item.role === "user" ? "Vous" : "Helio"}</b>
                 <p>{item.text}</p>
+                {item.citations.length > 0 && <small>Sources : {item.citations.join(", ")}</small>}
+                {item.actions.length > 0 && <div className="approvalActions">{item.actions.map((action, i) => <ActionLink key={i} action={action} />)}</div>}
               </article>
             ))}
           </div>
+          {chat.isPending && <p className="feedback" role="status">Helio prépare votre réponse…</p>}
+          {chat.isError && <p className="feedback error" role="alert">La demande n’a pas abouti : {chat.error.message}</p>}
           <div className="composer">
             <textarea
+              aria-label="Votre message à Helio"
+              maxLength={4000}
               value={message}
               onChange={(event) => setMessage(event.target.value)}
-              placeholder="Ex : Peux-tu vérifier la commande ord_ABC123 ?"
+              onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) sendMessage(); }}
+              placeholder="Ex. Où en est la commande #1001 ?"
             />
-            <button disabled={chat.isPending} onClick={sendMessage}>
-              {chat.isPending ? "Réflexion..." : "Envoyer"}
+            <button disabled={chat.isPending || !message.trim()} onClick={sendMessage}>
+              {chat.isPending ? "Réflexion…" : "Envoyer ↗"}
             </button>
           </div>
         </section>
-        <aside className="approvalPanel">
-          <h2>Approbation manager</h2>
-          <p>
-            L’agent peut proposer un remboursement, mais il ne peut jamais
-            l’exécuter seul.
-          </p>
-          <label htmlFor="approval-id">Approval ID</label>
-          <input
-            id="approval-id"
-            value={approvalId}
-            onChange={(event) => setApprovalId(event.target.value)}
-            placeholder="apr_..."
-          />
-          <button
-            disabled={!approvalId || loadApproval.isPending}
-            onClick={() => loadApproval.mutate(approvalId)}
-          >
-            Charger
-          </button>
-          {approval && (
-            <div className="approvalCard">
-              <dl>
-                <dt>Commande</dt>
-                <dd>{approval.orderId}</dd>
-                <dt>Statut</dt>
-                <dd>{approval.status}</dd>
-                <dt>Raison</dt>
-                <dd>{approval.reason}</dd>
-              </dl>
-              <div className="approvalActions">
-                <button
-                  disabled={approval.status !== "pending" || approve.isPending}
-                  onClick={() => approve.mutate(approval.id)}
-                >
-                  Approuver
-                </button>
-                <button
-                  disabled={approval.status !== "approved" || execute.isPending}
-                  onClick={() => execute.mutate(approval.id)}
-                >
-                  Exécuter le remboursement
-                </button>
-              </div>
-            </div>
-          )}
-          {managerMessage && (
-            <div className="managerMessage">{managerMessage}</div>
-          )}
-          <hr />
-          <h2>Base de connaissances</h2>
-          <p>
-            Réservé au rôle tenant_admin. Le texte est stocké dans S3, envoyé
-            dans SQS puis vectorisé par le worker.
-          </p>
-          <input
-            value={knowledgeTitle}
-            onChange={(event) => setKnowledgeTitle(event.target.value)}
-            placeholder="Titre du document"
-          />
-          <textarea
-            value={knowledgeText}
-            onChange={(event) => setKnowledgeText(event.target.value)}
-            placeholder="Contenu à indexer..."
-          />
-          <button
-            disabled={
-              knowledgeTitle.trim().length < 3 ||
-              knowledgeText.trim().length < 20 ||
-              submitKnowledge.isPending
-            }
-            onClick={() =>
-              submitKnowledge.mutate({
-                title: knowledgeTitle.trim(),
-                text: knowledgeText.trim(),
-              })
-            }
-          >
-            Envoyer pour indexation
-          </button>
-          {knowledgeMessage && (
-            <div className="managerMessage">{knowledgeMessage}</div>
-          )}
-        </aside>
-      </div>
-    </main>
+        {view === "tickets" && <Tickets userId={me.data.userId} focus={focusTicket} />}
+        {view === "approvals" && manager && <Approvals userId={me.data.userId} focus={focusApproval} />}
+        {view === "knowledge" && admin && <DocumentLibrary />}
+        {view === "settings" && admin && <WorkspaceAdmin />}
+        <div className="trustRow"><span>▤ Consultez les sources</span><span>✓ Vérifiez les propositions</span><span>↗ Passez à l’action</span></div><footer>Vérifiez les informations de la réponse avant de les transmettre à un client.</footer>
+      </main>
+    </div>
   );
 }

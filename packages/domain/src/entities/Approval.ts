@@ -13,6 +13,8 @@ export class Approval {
     public readonly reason: string,
     status: ApprovalStatus,
     approvalBy: UserId | null,
+    /** Null only for proposals made before the author was recorded. */
+    public readonly proposedBy: UserId | null,
   ) {
     this.statusValue = status;
     this.approvalByValue = approvalBy;
@@ -23,6 +25,7 @@ export class Approval {
     orderId: OrderId;
     tenantId: TenantId;
     reason: string;
+    proposedBy: UserId;
   }): Approval {
     return new Approval(
       input.id,
@@ -31,6 +34,7 @@ export class Approval {
       input.reason,
       "pending",
       null,
+      input.proposedBy,
     );
   }
 
@@ -41,6 +45,7 @@ export class Approval {
     status: ApprovalStatus;
     reason: string;
     approvalBy: UserId | null;
+    proposedBy: UserId | null;
   }): Approval {
     return new Approval(
       input.id,
@@ -49,6 +54,7 @@ export class Approval {
       input.reason,
       input.status,
       input.approvalBy,
+      input.proposedBy,
     );
   }
 
@@ -63,7 +69,13 @@ export class Approval {
   approve(userId: UserId): void {
     if (this.statusValue !== "pending") {
       throw new ApprovalError(
-        "Approval can only be approved when it is pending.",
+        "Seule une proposition en attente peut être approuvée.",
+      );
+    }
+    // Four-eyes control: the author of a refund proposal cannot approve it.
+    if (this.proposedBy?.equals(userId)) {
+      throw new ApprovalError(
+        "Vous avez fait cette proposition : une autre personne doit l’approuver.",
       );
     }
     this.statusValue = "approved";
@@ -73,7 +85,7 @@ export class Approval {
   reject(): void {
     if (this.statusValue !== "pending") {
       throw new ApprovalError(
-        "Approval can only be rejected when it is pending.",
+        "Seule une proposition en attente peut être refusée.",
       );
     }
     this.statusValue = "rejected";
@@ -82,7 +94,7 @@ export class Approval {
   markExecuted(): void {
     if (this.statusValue !== "approved") {
       throw new ApprovalError(
-        "Approval can only be marked as executed when it is approved.",
+        "Seule une proposition approuvée peut être exécutée.",
       );
     }
     this.statusValue = "executed";

@@ -13,3 +13,5 @@ coverage
 !.vscode/settings.json
 
 *.log
+
+output/*

@@ -14,6 +14,8 @@ model Order {
     currency   String    @db.VarChar(3)
     paymentId  String?   @db.VarChar(80)
     paidAt     DateTime?
+    // The number the customer sees in the store, e.g. #1001.
+    reference  String?   @db.VarChar(40)
     createdAt  DateTime  @default(now())
     updatedAt  DateTime  @updatedAt
 
@@ -28,10 +30,14 @@ model Ticket {
     subject   String   @db.VarChar(200)
     body      String
     status    String   @db.VarChar(30)
+    orderId    String?   @db.VarChar(80)
+    resolvedBy String?   @db.VarChar(80)
+    resolvedAt DateTime?
     createdAt DateTime @default(now())
 
     @@id([tenantId, id])
     @@index([tenantId, status])
+    @@index([tenantId, createdAt])
 }
 
 model Approval {
@@ -40,6 +46,7 @@ model Approval {
     orderId    String   @db.VarChar(80)
     reason     String
     status     String   @db.VarChar(30)
+    proposedBy String?  @db.VarChar(80)
     approvedBy String?  @db.VarChar(80)
     createdAt  DateTime @default(now())
     updatedAt  DateTime @updatedAt
@@ -71,11 +78,159 @@ model RefundExecution {
     paymentId        String   @db.VarChar(80)
     actorId          String   @db.VarChar(80)
     idempotencyKey   String   @unique
+    // Provider account and amount are fixed at intent time: a replay never changes them.
+    account          String   @db.VarChar(200)
+    amountCents      Int
+    currency         String   @db.VarChar(3)
     providerRefundId String?
+    // Set when the provider definitively refused; such an intent is never retried.
+    failureReason    String?
     createdAt        DateTime @default(now())
     updatedAt        DateTime @updatedAt
 
     @@id([tenantId, approvalId])
     @@unique([tenantId, orderId])
     @@index([providerRefundId, createdAt])
+}
+
+model Tenant {
+    id           String                    @id @db.VarChar(80)
+    name         String                    @db.VarChar(200)
+    slug         String                    @unique @db.VarChar(120)
+    createdAt    DateTime                  @default(now())
+    updatedAt    DateTime                  @updatedAt
+    settings     TenantSettings?
+    memberships  Membership[]
+    documents    KnowledgeDocument[]
+    versions     KnowledgeDocumentVersion[]
+}
+
+model TenantSettings {
+    tenantId                     String   @id @db.VarChar(80)
+    version                      Int      @default(1)
+    locale                       String   @default("fr-FR") @db.VarChar(20)
+    responseTone                 String   @default("professional") @db.VarChar(40)
+    refundApprovalThresholdCents Int      @default(0)
+    updatedBy                    String   @db.VarChar(80)
+    updatedAt                    DateTime @updatedAt
+    tenant                       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+model Membership {
+    active    Boolean @default(true)
+    tenantId  String   @db.VarChar(80)
+    userId    String   @db.VarChar(80)
+    email     String   @db.VarChar(320)
+    role      String   @db.VarChar(40)
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+    tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+    @@id([tenantId, userId])
+    @@index([tenantId, role])
+}
+
+model KnowledgeDocument {
+    publishedVersion Int?
+    lockedAt DateTime?
+    failureCode String?
+    tenantId       String                    @db.VarChar(80)
+    id             String                    @db.VarChar(80)
+    title          String                    @db.VarChar(300)
+    status         String                    @db.VarChar(30)
+    sourceKey      String                    @db.VarChar(500)
+    currentVersion Int                       @default(1)
+    createdBy      String                    @db.VarChar(80)
+    createdAt      DateTime                  @default(now())
+    updatedAt      DateTime                  @updatedAt
+    tenant         Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    versions       KnowledgeDocumentVersion[]
+
+    @@id([tenantId, id])
+    @@index([tenantId, status])
+}
+
+model KnowledgeDocumentVersion {
+    title String @default("") @db.VarChar(300)
+    tenantId   String            @db.VarChar(80)
+    documentId String            @db.VarChar(80)
+    version    Int
+    content    String
+    createdBy  String            @db.VarChar(80)
+    createdAt  DateTime          @default(now())
+    tenant     Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+    document   KnowledgeDocument @relation(fields: [tenantId, documentId], references: [tenantId, id], onDelete: Cascade)
+
+    @@id([tenantId, documentId, version])
+}
+
+model SettingsRevision {
+    tenantId String @db.VarChar(80)
+    version Int
+    name String
+    locale String
+    responseTone String
+    refundApprovalThresholdCents Int
+    actorId String
+    createdAt DateTime @default(now())
+    @@id([tenantId, version])
+}
+
+// The tenant's Shopify store. The access token is encrypted (KMS in AWS) and bound to the tenant.
+model ShopifyConnection {
+    tenantId        String   @id @db.VarChar(80)
+    shopDomain      String   @db.VarChar(120)
+    tokenCiphertext String
+    connectedBy     String   @db.VarChar(80)
+    createdAt       DateTime @default(now())
+    updatedAt       DateTime @updatedAt
+}
+
+// Chat memory, private to the member who holds the conversation.
+model Conversation {
+    tenantId  String   @db.VarChar(80)
+    id        String   @db.VarChar(80)
+    userId    String   @db.VarChar(80)
+    title     String   @db.VarChar(120)
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+    messages  ConversationMessage[]
+
+    @@id([tenantId, id])
+    @@index([tenantId, userId, updatedAt])
+}
+
+model ConversationMessage {
+    tenantId       String       @db.VarChar(80)
+    conversationId String       @db.VarChar(80)
+    seq            Int
+    role           String       @db.VarChar(20)
+    text           String
+    citations      Json?
+    actions        Json?
+    createdAt      DateTime     @default(now())
+    conversation   Conversation @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade)
+
+    @@id([tenantId, conversationId, seq])
+}
+
+// Per-tenant quota counters shared by all API instances.
+model QuotaWindow {
+    key         String   @db.VarChar(200)
+    windowStart DateTime @db.Timestamptz(3)
+    count       Int
+    @@id([key, windowStart])
+}
+
+model WorkspaceInvitation {
+    id String @id @default(uuid())
+    tenantId String @db.VarChar(80)
+    tokenHash String @unique
+    role String
+    expiresAt DateTime
+    acceptedAt DateTime?
+    revokedAt DateTime?
+    createdBy String
+    createdAt DateTime @default(now())
+    @@index([tenantId])
 }

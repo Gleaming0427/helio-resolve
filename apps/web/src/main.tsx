@@ -14,6 +14,11 @@ function renderApp(): void {
   );
 }
 async function boot(): Promise<void> {
+  const invitation = new URLSearchParams(location.search).get("invite");
+  if (invitation && /^[a-f0-9]{64}$/.test(invitation)) {
+    sessionStorage.setItem("helio-invitation", invitation);
+    history.replaceState({}, "", location.pathname);
+  }
   if (auth.isDev) {
     renderApp();
     return;

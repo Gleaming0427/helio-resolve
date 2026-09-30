@@ -12,8 +12,16 @@ export type OrderProps = {
   total: Money;
   paymentId: PaymentId | null;
   paidAt: Date | null;
+  /** The number the customer sees in the store, e.g. #1001. */
+  reference?: string | null;
 };
 
+const statusLabels: Record<OrderStatus, string> = {
+  pending: "en attente de paiement",
+  paid: "payée",
+  refund_pending: "remboursement en attente",
+  refunded: "remboursée",
+};
 const DAY_IN_MS = 86_400_000; // 24 hours in milliseconds
 const REFUND_WINDOW_DAYS = 30; // Refund window in days
 
@@ -53,26 +61,30 @@ export class Order {
     return this.props.paidAt;
   }
 
+  get reference(): string | null {
+    return this.props.reference ?? null;
+  }
+
   requestRefund(now: Date): void {
     if (this.statusValue !== "paid") {
       throw new RefundNotAllowed(
-        `Only paid orders can be refunded. Current status: ${this.statusValue}`,
+        `Seule une commande payée peut être remboursée (statut actuel : ${statusLabels[this.statusValue]}).`,
       );
     }
 
     if (!this.props.paidAt) {
-      throw new RefundNotAllowed("Paid date is missing for the order.");
+      throw new RefundNotAllowed("La date de paiement de la commande est inconnue.");
     }
 
     if (now.getTime() < this.props.paidAt.getTime()) {
-      throw new RefundNotAllowed("Paid date is in the future.");
+      throw new RefundNotAllowed("La date de paiement de la commande est dans le futur.");
     }
 
     const elapsedDays =
       (now.getTime() - this.props.paidAt.getTime()) / DAY_IN_MS;
     if (elapsedDays > REFUND_WINDOW_DAYS) {
       throw new RefundNotAllowed(
-        `Refund request is outside the allowed window of ${REFUND_WINDOW_DAYS} days.`,
+        `La demande dépasse le délai de remboursement de ${REFUND_WINDOW_DAYS} jours.`,
       );
     }
 
@@ -82,10 +94,20 @@ export class Order {
   confirmRefund(): void {
     if (this.statusValue !== "refund_pending") {
       throw new RefundNotAllowed(
-        `Only orders with a pending refund can be confirmed. Current status: ${this.statusValue}`,
+        `Aucun remboursement n’est en attente pour cette commande (statut actuel : ${statusLabels[this.statusValue]}).`,
       );
     }
     this.statusValue = "refunded";
+  }
+
+  /** A rejected proposal returns the order to paid, so a new request can be made. */
+  cancelRefundRequest(): void {
+    if (this.statusValue !== "refund_pending") {
+      throw new RefundNotAllowed(
+        `Aucun remboursement n’est en attente pour cette commande (statut actuel : ${statusLabels[this.statusValue]}).`,
+      );
+    }
+    this.statusValue = "paid";
   }
 
   private assertState(): void {
@@ -95,7 +117,7 @@ export class Order {
 
     if (requiresPayment && (!this.props.paymentId || !this.props.paidAt)) {
       throw new DomainError(
-        "Paid orders must have a paymentId and paidAt date.",
+        "Une commande payée doit avoir un paiement et une date de paiement.",
       );
     }
   }

@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import type { PaymentGateway, UnitOfWork } from "@helio/application";
-import { ApproveAction, CreateTicket, ExecuteRefund, ProposeRefund, ResumeRefunds } from "../../application/src/usecases.js";
+import { ApproveAction, CreateTicket, ExecuteRefund, OrderResolver, ProposeRefund, ResumeRefunds } from "../../application/src/usecases.js";
+import { TenantId, OrderId, ApprovalId } from "@helio/domain";
 
 const url = process.env.HELIO_TEST_DATABASE_URL;
 if (!url || new URL(url).pathname !== "/helio_refund_test") {
@@ -12,6 +13,8 @@ let unitOfWork: UnitOfWork;
 const tenantId = "ten_TEST123";
 const orderId = "ord_TEST123";
 const actorId = "usr_MANAGER1";
+// Four-eyes control: the manager approving a proposal is not its author.
+const proposerId = "usr_AGENT1";
 const now = new Date("2026-09-29T10:00:00Z");
 
 beforeAll(async () => {
@@ -39,6 +42,9 @@ class IdempotentProvider implements PaymentGateway {
   calls: string[] = [];
   effects = new Map<string, string>();
   timeoutOnce = false;
+  async account() {
+    return "fake";
+  }
   async refund(input: Parameters<PaymentGateway["refund"]>[0]) {
     this.calls.push(input.idempotencyKey);
     const refundId = this.effects.get(input.idempotencyKey) ?? `provider-${this.effects.size + 1}`;
@@ -62,8 +68,8 @@ function failAfterAudit(action: string): UnitOfWork {
     })),
   };
 }
-const propose = (uow = unitOfWork) => new ProposeRefund(uow).execute({
-  tenantId, actorId, orderId, reason: "Duplicate shipment", now,
+const propose = (uow = unitOfWork) => new ProposeRefund(uow, new OrderResolver(uow)).execute({
+  tenantId, actorId: proposerId, orderId, reason: "Duplicate shipment", now,
 });
 async function approved() {
   const proposal = await propose();
@@ -72,6 +78,41 @@ async function approved() {
 }
 
 describe("refund transactions on PostgreSQL", () => {
+  it("isolates order reads, proposals and approvals between tenants", async () => {
+    const { PrismaOrderRepository, PrismaApprovalRepository } = await import("../src/repositories.js");
+    const other = "ten_OTHER123";
+    expect(await new PrismaOrderRepository(db).findById(TenantId.of(other), OrderId.of(orderId))).toBeNull();
+    await expect(new ProposeRefund(unitOfWork, new OrderResolver(unitOfWork)).execute({ tenantId: other, actorId, orderId, reason: "Attempt from another tenant", now })).rejects.toThrow("introuvable");
+    const proposal = await propose();
+    expect(await new PrismaApprovalRepository(db).findById(TenantId.of(other), ApprovalId.of(proposal.approvalId))).toBeNull();
+    await expect(new ApproveAction(unitOfWork).execute({ tenantId: other, approvalId: proposal.approvalId, managerUserId: actorId })).rejects.toThrow("introuvable");
+    expect((await db.approval.findFirstOrThrow()).status).toBe("pending");
+    expect(await db.auditEvent.count({ where: { tenantId: other } })).toBe(0);
+  });
+
+  it("never executes or replays another tenant's approved refund", async () => {
+    const input = await approved();
+    const other = "ten_OTHER123";
+    const provider = new IdempotentProvider();
+    await expect(new ExecuteRefund(unitOfWork, provider).execute({ ...input, tenantId: other })).rejects.toThrow("introuvable");
+    expect(provider.calls).toEqual([]);
+    expect(await db.refundExecution.count()).toBe(0);
+    expect((await db.order.findUniqueOrThrow({ where: { tenantId_id: { tenantId, id: orderId } } })).status).toBe("refund_pending");
+    expect((await db.approval.findFirstOrThrow()).status).toBe("approved");
+    await new ExecuteRefund(unitOfWork, provider).execute(input);
+    // A persisted intent is looked up by tenant too: it cannot be replayed from elsewhere.
+    await expect(new ExecuteRefund(unitOfWork, provider).execute({ ...input, tenantId: other })).rejects.toThrow("introuvable");
+    expect(provider.calls).toEqual([`refund:${tenantId}:${input.approvalId}`]);
+    expect(await db.auditEvent.count({ where: { tenantId: other } })).toBe(0);
+  });
+
+  it("keeps identical order identifiers independent across tenants", async () => {
+    const other = "ten_OTHER123";
+    await db.order.create({ data: { tenantId: other, id: orderId, status: "paid", totalCents: 1200, currency: "EUR", paymentId: "pay_OTHER123", paidAt: now } });
+    await propose();
+    expect((await db.order.findUniqueOrThrow({ where: { tenantId_id: { tenantId: other, id: orderId } } })).status).toBe("paid");
+    expect(await db.approval.count({ where: { tenantId: other } })).toBe(0);
+  });
   it("rolls back the order, approval and audit when proposal persistence fails", async () => {
     await expect(propose(failAfterAudit("refund.proposed"))).rejects.toThrow("Injected");
     expect((await db.order.findUniqueOrThrow({ where: { tenantId_id: { tenantId, id: orderId } } })).status).toBe("paid");
@@ -80,7 +121,7 @@ describe("refund transactions on PostgreSQL", () => {
   });
 
   it("rolls back ticket creation when its audit fails", async () => {
-    await expect(new CreateTicket(failAfterAudit("ticket.created")).execute({
+    await expect(new CreateTicket(failAfterAudit("ticket.created"), new OrderResolver(unitOfWork)).execute({
       tenantId, userId: actorId, subject: "Help", body: "My order",
     })).rejects.toThrow("Injected");
     expect(await db.ticket.count()).toBe(0);
@@ -109,8 +150,8 @@ describe("refund transactions on PostgreSQL", () => {
     const proposal = await propose();
     const provider = new IdempotentProvider();
     const execute = new ExecuteRefund(unitOfWork, provider);
-    await expect(execute.execute({ tenantId, approvalId: proposal.approvalId, managerUserId: actorId })).rejects.toThrow("not approved");
-    await expect(execute.execute({ tenantId: "ten_OTHER123", approvalId: proposal.approvalId, managerUserId: actorId })).rejects.toThrow("not found");
+    await expect(execute.execute({ tenantId, approvalId: proposal.approvalId, managerUserId: actorId })).rejects.toThrow("approuvée");
+    await expect(execute.execute({ tenantId: "ten_OTHER123", approvalId: proposal.approvalId, managerUserId: actorId })).rejects.toThrow("introuvable");
     expect(provider.calls).toHaveLength(0);
     expect(await db.refundExecution.count()).toBe(0);
   });

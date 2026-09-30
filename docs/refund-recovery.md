@@ -37,13 +37,17 @@ pour une commande. Les transactions sérialisables empêchent les propositions
 concurrentes et les doubles finalisations locales. Des appels prestataire peuvent
 être concurrents : leur déduplication relève du contrat `PaymentGateway`.
 
-**Prérequis du prestataire réel :** il doit garantir l'idempotence des appels
-concurrents et rejoués, et restituer la référence initiale après une perte de réponse.
-Tenir compte de sa durée de conservation des clés : passé ce délai, réconcilier
-le paiement chez le prestataire avant toute nouvelle tentative. Ne pas changer
-de compte/prestataire entre l'API et la reprise. Le projet utilise encore
-`FakePaymentGateway`, partagé par les deux chemins dans `apps/api/src/payments.ts`.
-Cette implémentation ne réalise aucun transfert d'argent.
+**Prestataire :** Shopify (`ConnectedPaymentGateway`, partagé par l'API et la reprise
+dans `apps/api/src/payments.ts`). `refundCreate` reçoit une clé d'idempotence dérivée
+de la clé persistée ; Shopify renvoie le remboursement d'origine pour un rejeu. Passé
+le délai de conservation des clés, Helio retrouve un remboursement antérieur par sa
+note `Helio <clé>` avant tout nouvel appel. L'intention enregistre le compte
+(`shopify:<boutique>`) et le montant : un rejeu n'utilise jamais une autre boutique,
+et la boutique ne peut pas être changée tant qu'un remboursement est en cours.
+Un refus définitif (`RefundRejected`) est enregistré dans `failureReason` : l'intention
+n'est plus reprise et doit être traitée dans Shopify. Sans boutique connectée, le
+prestataire simulé (`FakePaymentGateway`, aucun transfert) ne sert qu'en dehors de la
+production. Voir [shopify-pilot.md](shopify-pilot.md).
 
 ## Installation de la migration
 
@@ -98,8 +102,10 @@ npm test
 ```
 
 Les tests PostgreSQL exigent une base dédiée nommée `helio_refund_test`, migrée
-avec les deux migrations. Ils effacent ses données métier : ne pas utiliser une
-base partagée. Fournir son URL uniquement pour ces tests :
+avec toutes les migrations (`DATABASE_URL=<url de test> npm run db:deploy`). Ils effacent
+ses données métier : ne pas utiliser une base partagée. La CI GitHub
+(`.github/workflows/ci.yml`) les exécute à chaque push et pull request. En local,
+fournir son URL uniquement pour ces tests :
 
 ```bash
 HELIO_TEST_DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/helio_refund_test npm run test:integration
@@ -110,5 +116,3 @@ exécutions concurrentes, les réponses prestataire perdues, les échecs après 
 et la reprise. PostgreSQL est réel ; le prestataire de paiement est une simulation
 idempotente. Aucun paiement réel ni appel AWS n'est effectué.
 
-Le flux S3/SQS de dépôt documentaire reste indépendant de cette modification :
-il n'est pas rendu transactionnel par les transactions de remboursement.

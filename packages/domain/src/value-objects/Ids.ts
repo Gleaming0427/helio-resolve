@@ -17,7 +17,7 @@ function validate(prefix: string, value: string): string {
   const regex = new RegExp(`^${prefix}_[a-zA-Z0-9-]{6,64}$`);
 
   if (!regex.test(normalized)) {
-    throw new DomainError(`Invalid ${prefix} format: ${value}`);
+    throw new DomainError(`Identifiant invalide : ${value}`);
   }
 
   return normalized;

@@ -7,8 +7,8 @@ import { PrismaAuditLog } from "./audit.js";
 import { PrismaApprovalRepository, PrismaOrderRepository, PrismaTicketRepository } from "./repositories.js";
 import { prisma } from "./prisma.js";
 
-class PrismaRefundExecutions implements RefundExecutionRepository {
-  constructor(private readonly db: Prisma.TransactionClient) {}
+export class PrismaRefundExecutions implements RefundExecutionRepository {
+  constructor(private readonly db: Prisma.TransactionClient = prisma) {}
 
   find(tenantId: TenantId, approvalId: ApprovalId): Promise<RefundExecution | null> {
     return this.db.refundExecution.findUnique({
@@ -27,9 +27,16 @@ class PrismaRefundExecutions implements RefundExecutionRepository {
     });
   }
 
+  async fail(tenantId: TenantId, approvalId: ApprovalId, reason: string): Promise<void> {
+    await this.db.refundExecution.update({
+      where: { tenantId_approvalId: { tenantId: tenantId.toString(), approvalId: approvalId.toString() } },
+      data: { failureReason: reason.slice(0, 1000) },
+    });
+  }
+
   pending(limit: number): Promise<RefundExecution[]> {
     return this.db.refundExecution.findMany({
-      where: { providerRefundId: null },
+      where: { providerRefundId: null, failureReason: null },
       orderBy: [{ createdAt: "asc" }, { tenantId: "asc" }, { approvalId: "asc" }],
       take: limit,
     });
