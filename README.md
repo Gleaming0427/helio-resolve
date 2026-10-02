@@ -1,200 +1,186 @@
 # Helio Resolve
-Helio Resolve is a B2B agentic customer support application. The LLM orchestrates tools, but the domain and
-use cases remain the authority. A refund is first proposed, then approved and executed explicitly by an
-authorized human.
 
-## What the MVP contains
-- React + Vite for the support console.
-- Fastify 5 for the API.
-- Isolated TypeScript domain: Order, Ticket, Approval, Money, and IDs.
-- PostgreSQL + Prisma for relational data.
-- pgvector for semantic search.
-- Amazon Bedrock Converse for the agent loop and tool use.
-- Amazon Titan Embeddings for RAG indexing.
-- Versioned document library with a durable PostgreSQL queue and an indexing worker.
-- Shopify connector (Admin GraphQL API 2026-04): orders read from the store, refunds with idempotency keys.
-- Chat memory per conversation, tickets linked to orders.
-- Cognito for OIDC/PKCE in production.
-- Four-eyes human approval before refund execution, with durable, replayable refund intents.
-- Application-level audit of sensitive actions.
-- CDK for VPC, RDS, ECS/Fargate, ALB (HTTPS), WAF, S3, KMS, Cognito, CloudFront and CloudWatch alarms.
+**Customer support, from the first question to the resolved request.**
 
-## Local startup of the core app and database
+Helio gives support teams one place to consult company procedures, look up orders, create tickets, and handle refunds. An AI assistant helps with the request; business rules and human approval govern the actions it can take.
+
+Built as a multi-tenant B2B application with a local demo, a Shopify integration, and AWS infrastructure defined in code.
+
+[Quick start](#quick-start) · [Try the demo](#try-the-demo) · [Architecture](#architecture) · [Testing](#testing) · [AWS deployment](docs/operations.md#aws-deployment)
+
+## What you can do
+
+- **Answer from your own documentation.** Publish delivery policies, return conditions, and support procedures. The assistant searches your company's published documents and cites the sources used in its answer.
+- **Work with orders and tickets.** Read Shopify orders, create tickets linked to a purchase, mark them resolved, and return to previous conversations.
+- **Review refunds before they happen.** A refund needs a proposal, approval by another person, and explicit execution. Managers have a configurable approval ceiling; administrators handle requests above it.
+- **Manage your workspace.** Invite colleagues, assign roles, suspend access, and configure the assistant's language and tone. Settings keep a revision history.
+- **Maintain a document library.** Save drafts, publish new versions, track indexing, retry failures, and withdraw outdated procedures. A draft never replaces a published version until indexing succeeds.
+
+## Quick start
+
+### Requirements
+
+- Node.js **24** and npm — the Node version is also pinned in [`.nvmrc`](.nvmrc).
+- Docker with Docker Compose, for PostgreSQL and pgvector.
+- AWS credentials with access to the configured Bedrock models, for chat and document indexing.
+
+The local interface and workspace administration run without Cognito or Shopify. Chat and indexing still call Bedrock; they are not simulated offline.
+
+### 1. Install and prepare the database
+
 ```bash
+git clone https://github.com/Gleaming0427/helio-resolve.git
+cd helio-resolve
+
 cp .env.example .env
-docker compose up -d
-npm install
+npm ci
+docker compose up -d --wait postgres
+
 npm run db:generate
-npm run db:migrate
+npm run db:deploy
 npm run build:packages
 npm run db:seed
-npm test
-npm run typecheck
-```
-The seed creates the demo workspace `ten_DEMO123` (administrator `usr_DEMO123`, agent `usr_DEMOAGENT`)
-and a new paid order `ord_DEMO-…` on each run, printed in the terminal.
-
-PostgreSQL integration tests need a dedicated database named `helio_refund_test` (its data is cleared);
-the GitHub CI (`.github/workflows/ci.yml`) runs them on every push and pull request:
-```bash
-DATABASE_URL=postgresql://helio:helio@localhost:5432/helio_refund_test npm run db:deploy
-HELIO_TEST_DATABASE_URL=postgresql://helio:helio@localhost:5432/helio_refund_test npm run test:integration
 ```
 
-## Local authentication
-`.env.example` runs without Cognito:
-```env
-NODE_ENV=development
-AUTH_MODE=dev
-VITE_AUTH_MODE=dev
-DEV_TENANT_ID=ten_DEMO123
-DEV_USER_ID=usr_DEMO123
-DEV_ROLES=support_manager,tenant_admin
-```
-The bypass is explicitly disabled when `NODE_ENV=production`. In dev mode, the header selector
-« agir en tant que » switches between the demo administrator and the demo agent; memberships in PostgreSQL
-still decide tenant and roles.
+Already have a checkout? Keep your existing `.env` and skip the clone and copy steps.
 
-## Start the API and frontend
-Terminal 1:
-```bash
-npm run dev-api
-```
-Terminal 2:
-```bash
-npm run dev-web
-```
-Then open `http://localhost:5173`.
+The seed creates a demo administrator, a demo support agent, and a paid **€49 order**. Copy the order ID printed in the terminal: each seed run creates a new order.
 
-## Using Bedrock and RAG
-Real chat requires AWS credentials and access to the configured models in:
-```env
+### 2. Configure Bedrock
+
+The defaults in `.env` are:
+
+```dotenv
 AWS_REGION=eu-west-3
 BEDROCK_MODEL_ID=eu.amazon.nova-pro-v1:0
 BEDROCK_EMBED_MODEL_ID=amazon.titan-embed-text-v2:0
 ```
-In a third terminal, run `npm run dev-worker`. The API saves drafts and publication requests in PostgreSQL.
-The worker claims a task, generates embeddings and publishes the entire version atomically. An interrupted
-task can be reclaimed after five minutes. Failed tasks can be retried from the document library.
-The worker writes one JSON line per task (`document_indexed`, `document_indexing_superseded`,
-`document_indexing_failed` with its cause) and stores a failure code: `embedding_failed` (Bedrock) or
-`storage_failed` (PostgreSQL). The library warns when a document stays queued for more than two minutes
-or its lease expires, which means no worker is running. In AWS, two alarms notify the `AlarmTopicArn` SNS
-topic: worker errors, and no running worker task. Set `ALARM_EMAIL` before `cdk deploy` to subscribe an
-address (confirm the subscription email).
-The former S3/SQS ingestion path has been removed. The CDK stack deletes its queues and keeps the old
-knowledge bucket for its data, with no access granted to the API or the worker.
 
-## Lot 2 — administration et documents
+Use an AWS credential profile available to the API and worker processes. If you use a named profile, set `AWS_PROFILE` in their environment. AWS credentials belong on the server, never in `VITE_*` variables.
 
-Appliquer les migrations existantes et régénérer le client avant de relancer l’application :
+For local authentication, keep both `AUTH_MODE=dev` and `VITE_AUTH_MODE=dev`, as supplied in [`.env.example`](.env.example).
+
+### 3. Start the application
+
+Run these commands in **three separate terminals**, from the repository root:
 
 ```bash
-npm run db:deploy
-npm run db:generate
-npm run build:packages
+# Terminal 1 — API
+npm run dev-api
 ```
-
-- **Réglages** : nom de l’entreprise, langue, ton et plafond de remboursement des managers en euros.
-  Chaque sauvegarde conserve une révision. « Reprendre ces valeurs » recharge une ancienne version dans
-  le formulaire ; enregistrer crée une nouvelle révision. Une modification concurrente est refusée.
-  La langue et le ton sont transmis à l’assistant dès la prochaine demande. Le plafond s’applique à
-  l’approbation et à l’exécution ; au-delà, ou pour une autre devise, un administrateur est nécessaire.
-- **Membres** : liens d’invitation à transmettre en privé, valables sept jours et à usage unique.
-  Aucun email n’est envoyé par Helio. Le destinataire se connecte puis accepte le lien. Un compte est
-  rattaché à un seul espace. Les rôles et suspensions en base priment sur les anciens groupes du jeton.
-  Le dernier administrateur actif ne peut pas être suspendu ou rétrogradé.
-  Chaque membre apparaît avec l’email vérifié par Cognito : à la connexion, le front envoie son ID token,
-  dont l’API contrôle la signature, l’application, l’utilisateur et `email_verified`. En mode dev, sans
-  Cognito, la liste affiche « Email pas encore vérifié » et l’identifiant.
-- **Documents** : créer un brouillon, publier, suivre l’indexation, consulter les versions, modifier,
-  retirer et supprimer. Le chat consulte uniquement les versions publiées de l’entreprise connectée et ne
-  cite que les documents sur lesquels sa réponse s’appuie. Pendant la modification ou en cas d’échec de la
-  nouvelle indexation, la version publiée précédente reste disponible. Le retrait exclut le document des
-  prochaines recherches ; les réponses déjà affichées ne sont pas effacées. Seul un document que le chat
-  ne peut plus utiliser (brouillon jamais publié, retiré ou en échec) peut être supprimé, avec ses versions.
-
-La migration `0004_workspace_lifecycle` remet les anciens documents gérés en brouillon : republiez-les
-depuis la bibliothèque. La migration `0005_import_legacy_knowledge` conserve l’ancien index sans identifiant
-de document : elle regroupe ses fragments par entreprise et titre dans des documents publiés importés.
-L’ancien index ne conservait pas l’ordre des paragraphes : relisez les fragments importés avant une édition.
-Les titres identiques d’une même entreprise sont regroupés, sans suppression de leurs fragments.
-
-Validation manuelle : modifier les réglages, recharger la page, vérifier l’historique ; créer une procédure,
-publier, attendre « Publié » puis poser une question dans le chat ; retirer et refaire une recherche.
-En mode dev, seuls les deux membres de démo sont disponibles et l’email vérifié n’existe pas. Utilisez
-deux comptes Cognito pour valider l’invitation et l’affichage des emails en conditions réelles.
-
-## Lot 3 — intégration métier (Shopify)
 
 ```bash
-npm run db:deploy && npm run db:generate && npm run build:packages
-npm run db:seed   # espace de démo, conseiller de démo et nouvelle commande payée
+# Terminal 2 — web interface
+npm run dev-web
 ```
 
-La migration `0007_business_integration` retrouve l’auteur des propositions existantes dans l’audit et
-rattache les intentions de remboursement existantes au prestataire simulé.
-
-- **Connecteur Shopify** (Réglages, administrateur) : commandes lues dans la boutique (`#1001`),
-  remboursements exécutés par `refundCreate` avec clé d’idempotence. Jeton chiffré (KMS en AWS,
-  `LOCAL_SECRET_KEY` en local). Détails, reprises et boutique de test : [docs/shopify-pilot.md](docs/shopify-pilot.md).
-- **Mémoire de conversation** : chaque conversation est enregistrée et privée à son auteur ; l’assistant
-  reçoit les 20 derniers messages. « Conversations récentes » permet de reprendre un échange.
-- **Tickets** : créés par l’assistant (liés à la commande), listés dans Tickets, marqués résolus.
-- **Remboursement contrôlé** : l’auteur d’une proposition ne peut pas l’approuver ; un manager peut la
-  refuser (la commande redevient remboursable) ; les approbations en attente sont listées ; un refus
-  définitif de la boutique est enregistré et n’est jamais repris.
-- Sans boutique connectée, la démo locale utilise le prestataire simulé (jamais en production).
-  En mode dev, « agir en tant que » bascule entre l’administrateur et le conseiller de démo pour
-  tester l’approbation à quatre yeux.
-
-Parcours de validation : en conseiller, demander au chat un remboursement pour la commande affichée par
-`db:seed` ; passer en administrateur, ouvrir la proposition depuis Approbations, l’approuver puis
-l’exécuter ; relancer l’exécution (même référence, aucun doublon).
-
-## Cognito in production
-The frontend uses Authorization Code + PKCE. The API expects a valid Cognito access token. To bootstrap
-the first administrator, assign `tenant_admin` and exactly one `tenant__<TenantId>` group (for example
-`tenant__ten_ACME123`) to a trusted Cognito identity. Bootstrap only works when the workspace has no members.
-Thereafter, PostgreSQL membership determines tenant and permissions; invitation recipients need no Cognito
-groups. `support_agent` uses the chat and tickets, `support_manager` also approves, rejects and executes
-refunds within the configured ceiling, and `tenant_admin` manages the workspace, members, documents, the
-Shopify connection and all refunds. Nobody can approve a refund proposal they made.
-The CDK enables self-registration with email verification so invitees can create their identity themselves.
-Registration alone grants no workspace access. Existing deployments need this CDK update before new
-colleagues can register; otherwise their identities must already exist in Cognito.
-The tenant is never accepted from the request body.
-
-## Errors and support references
-Every response carries an `x-request-id` (a UUID, unique across instances). The UI shows it as
-« Référence » for unexpected errors (5xx, unreadable responses); expected refusals show their business
-message only. Search the API logs for `reqId` to find the request. Internal errors are
-logged at `error` level with their type, code, message and stack, credentials in URLs and bearer tokens
-scrubbed; responses never include them. Rejected client requests (400, 403, 409, 429…) are logged at `info`.
-
-## Quotas
-Chat (20/min) and document creation/publication (10/min) are limited per tenant with a PostgreSQL counter
-(migration `0006_quota_window`), shared by all API instances. The 120 requests/min limit per client IP is a
-per-instance guard; the WAF IP rule is the shared limit. Behind the ALB, `TRUST_PROXY_HOPS=1` makes the API
-use the client address appended by the ALB; leave it empty when the API is reached directly.
-
-## AWS deployment
-The API is served over HTTPS only: the ALB has a single 443 listener (TLS 1.2+) and no port 80, since a
-bearer token sent over HTTP would already have leaked. Before `cdk deploy`, request an ACM certificate for the
-API host name in the stack region, then:
 ```bash
-export API_DOMAIN_NAME=api.example.com
-export API_CERTIFICATE_ARN=arn:aws:acm:eu-west-3:123456789012:certificate/...
+# Terminal 3 — document indexing
+npm run dev-worker
 ```
-Synthesis fails without them. After deployment, point `API_DOMAIN_NAME` to the `ApiLoadBalancerDnsName` output
-(CNAME or Route 53 alias).
-Build the frontend with `VITE_API_URL=https://<API_DOMAIN_NAME>`; a build targeting `http://` fails, except
-for `localhost`. Then sync `apps/web/dist` to the web bucket created by CDK. For the API and worker,
-`ContainerImage.fromAsset()` builds the Dockerfiles and pushes the images to an ECR repository managed by the
-CDK assets.
-The stack creates a KMS key (with rotation) for tenant store credentials and passes it to the API as
-`SECRET_KMS_KEY_ID`; only the API task role can use it. An operator running `npm run refunds:resume` for a
-Shopify tenant needs database access and `kms:Decrypt` on this key.
-Before a real production rollout, add a secret rotation strategy for the database, API alarms (5xx, latency),
-CloudTrail, GuardDuty Runtime Monitoring, a retention policy for chat conversations (they contain customer
-data), and agentic evaluation tests.
+
+Open **[localhost:5173](http://localhost:5173)**. The API runs at [localhost:3000](http://localhost:3000/health).
+
+## Try the demo
+
+The interface currently uses French labels. In development, the **“agir en tant que”** selector switches between the demo administrator and support agent.
+
+### Ask a question about a procedure
+
+1. As the administrator, open **Documents** and create a document titled “Delivery policy”.
+2. Paste: “Express delivery costs €9.90 and takes 24–48 hours. Standard delivery is free for orders over €50.”
+3. Save the draft, click **Publier**, and wait for **Publié**.
+4. In the assistant, ask: “According to our documentation, how much does express delivery cost?”
+
+Edit the document to create another version. The existing published version stays available until you publish the replacement. Withdrawing a document excludes it from future searches.
+
+### Walk through a refund
+
+1. Switch to the support agent and ask the assistant to propose a refund for the order ID printed by `db:seed`. Include a reason, such as a damaged item.
+2. Switch to the administrator and open **Approbations**.
+3. Review the proposal, approve it, then execute the refund.
+
+The proposal's author cannot approve it. Without a connected store, the local demo uses a simulated payment provider: no money is transferred. Run `npm run db:seed` again when you need another paid demo order.
+
+### Connect a Shopify store
+
+An administrator can connect a store from **Réglages**. In local development, set `LOCAL_SECRET_KEY` in `.env` to a key generated with `openssl rand -base64 32`, then restart the API. Keep this key stable so saved credentials remain readable.
+
+Use a development store for testing. The [Shopify pilot guide](docs/shopify-pilot.md) covers store setup, required permissions, supported orders, and refund recovery. Connecting a store makes Helio use that store's orders and payment provider.
+
+## Architecture
+
+Helio separates the support interface, business decisions, and external services:
+
+```text
+apps/
+  web/          React + Vite support console
+  api/          Fastify API, authentication, and authorization
+  workers/      Asynchronous document indexing
+packages/
+  domain/       Business entities, value objects, and rules
+  application/  Use cases and service interfaces
+  adapters/     Prisma, pgvector, Bedrock, Shopify, and KMS
+infra/
+  cdk/          AWS infrastructure
+```
+
+**Business rules remain in control.** Bedrock can request tools, but the application validates access, order state, and approval requirements. Refund execution is an explicit human action.
+
+**Each company has its own workspace.** Persisted memberships determine access. Documents and business records are scoped to the authenticated company; conversations are private to their author. Local identity switching is disabled in production.
+
+**Background work survives interruptions.** PostgreSQL stores document publication jobs and refund execution intents. Document versions become searchable atomically. Refund retries reuse the recorded payment context and idempotency key. See [refund transactions and recovery](docs/refund-recovery.md).
+
+## Testing
+
+After completing local setup:
+
+```bash
+npm run typecheck
+npm test
+npm run build
+```
+
+The PostgreSQL integration suite covers company isolation, concurrent changes, document publication, and refund recovery. It requires a dedicated database named `helio_refund_test` and clears test data.
+
+<details>
+<summary>Run integration tests with a separate PostgreSQL container</summary>
+
+Start a test database on a different port from the application database:
+
+```bash
+docker run --name helio-tests \
+  -e POSTGRES_USER=helio \
+  -e POSTGRES_PASSWORD=helio_test \
+  -e POSTGRES_DB=helio_refund_test \
+  -p 127.0.0.1:55432:5432 \
+  -d pgvector/pgvector:pg17
+```
+
+Wait until `docker exec helio-tests pg_isready -U helio -d helio_refund_test` reports that PostgreSQL is accepting connections, then run:
+
+```bash
+DATABASE_URL=postgresql://helio:helio_test@localhost:55432/helio_refund_test npm run db:deploy
+HELIO_TEST_DATABASE_URL=postgresql://helio:helio_test@localhost:55432/helio_refund_test npm run test:integration
+```
+
+The standard integration suite uses simulated external providers. Tests against a real Shopify development store are opt-in; see the pilot guide.
+
+Stop the test container with `docker stop helio-tests`; restart it later with `docker start helio-tests`.
+
+</details>
+
+[GitHub Actions](.github/workflows/ci.yml) runs type checks, unit tests, and PostgreSQL integration tests on pushes to `main` and on pull requests.
+
+## Deployment and operations
+
+The repository includes an AWS CDK stack for ECS/Fargate, RDS PostgreSQL, Bedrock access, Cognito, KMS, an HTTPS load balancer, WAF, S3/CloudFront, and worker alarms.
+
+The [operations guide](docs/operations.md) covers deployment requirements, first-administrator setup, database upgrades, quotas, and troubleshooting. Infrastructure deployment, database migrations, and frontend publishing are separate steps. The stack is a starting point for deployment; the guide identifies the remaining production work.
+
+## Documentation
+
+- [Operations and AWS deployment](docs/operations.md)
+- [Shopify pilot and development-store testing](docs/shopify-pilot.md) — French
+- [Refund transactions and recovery](docs/refund-recovery.md) — French
+- [Environment variables](.env.example)
